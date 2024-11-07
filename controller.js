@@ -25,7 +25,7 @@ export function agentController(req, res) {
         <Pause length="1"/>
         <Say>O.K. you can start talking!</Say>
         <Connect>
-            <Stream url="wss://${req.headers.host}/api/v1/webhook/media-stream" />
+            <Stream url="wss://${req.headers.host}/api/v1/media-stream" />
         </Connect>
     </Response>`;
 
@@ -36,6 +36,14 @@ export function agentController(req, res) {
 // Function to manage the media stream connection
 export function mediaStreamController(connection, req) {
   console.log("Client connected to media stream"); // Log when a client connects
+
+  // Add timeout constants
+  const CALL_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+  const WARNING_TIME = 30 * 1000; // Warning 30 seconds before timeout
+
+  // Declare timeout IDs for the warning and final timeout
+  let warningTimeoutId;
+  let finalTimeoutId;
 
   // Create a WebSocket connection to the OpenAI API
   const openAiWs = new WebSocket(
@@ -114,9 +122,45 @@ export function mediaStreamController(connection, req) {
   // Handle incoming messages from Twilio
   connection.on("message", (message) => {
     try {
-      const data = JSON.parse(message); // Parse the incoming message
+      const data = JSON.parse(message);
 
       switch (data.event) {
+        case "start":
+          streamSid = data.start.streamSid;
+          console.log("Incoming stream has started", streamSid);
+
+          // Initialize timeouts when stream starts
+          warningTimeoutId = setTimeout(() => {
+            if (openAiWs.readyState === WebSocket.OPEN) {
+              const warningMessage = {
+                type: "text",
+                text: "I need to let you know that our conversation will end in 30 seconds due to the time limit. It's been a pleasure talking with you!",
+              };
+              openAiWs.send(JSON.stringify(warningMessage));
+            }
+          }, CALL_TIMEOUT - WARNING_TIME);
+
+          finalTimeoutId = setTimeout(() => {
+            console.log(
+              "Call duration limit reached (10 minutes). Closing connection."
+            );
+            if (openAiWs.readyState === WebSocket.OPEN) {
+              const goodbyeMessage = {
+                type: "text",
+                text: "Our time is up now. Thank you for the conversation. Goodbye!",
+              };
+              openAiWs.send(JSON.stringify(goodbyeMessage));
+
+              setTimeout(() => {
+                // Close the WebSocket connection to the OpenAI API 5 secs after the goodbye message
+                openAiWs.close();
+                if (connection.readyState === WebSocket.OPEN) {
+                  connection.close();
+                }
+              }, 5000);
+            }
+          }, CALL_TIMEOUT);
+          break;
         case "media": // If the event is media
           if (openAiWs.readyState === WebSocket.OPEN) {
             // Check if the WebSocket is open
@@ -127,10 +171,6 @@ export function mediaStreamController(connection, req) {
 
             openAiWs.send(JSON.stringify(audioAppend)); // Send audio data to OpenAI
           }
-          break;
-        case "start": // If the event is start
-          streamSid = data.start.streamSid; // Get the stream ID
-          console.log("Incoming stream has started", streamSid); // Log the stream ID
           break;
         default:
           console.log("Received non-media event:", data.event); // Log any other events
@@ -143,6 +183,8 @@ export function mediaStreamController(connection, req) {
 
   // Handle connection close
   connection.on("close", () => {
+    clearTimeout(warningTimeoutId);
+    clearTimeout(finalTimeoutId);
     if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close(); // Close the WebSocket if it's open
     console.log("Client disconnected."); // Log when a client disconnects
   });

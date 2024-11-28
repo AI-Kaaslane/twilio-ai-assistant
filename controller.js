@@ -1,4 +1,6 @@
 import WebSocket from "ws"; // Importing the WebSocket library for real-time communication
+const fs = require("fs").promises;
+const path = require("path");
 
 // Instructions for the AI assistant's personality and behavior
 const SYSTEM_INSTRUCTIONS =
@@ -8,6 +10,8 @@ const VOICE = "alloy"; // The voice type for the AI assistant
 // Types of events that the system will log
 const LOG_EVENT_TYPES = [
   "response.content.done",
+  "response.content.start",
+  "response.content.part",
   "rate_limits.updated",
   "response.done",
   "input_audio_buffer.committed",
@@ -15,6 +19,11 @@ const LOG_EVENT_TYPES = [
   "input_audio_buffer.speech_started",
   "session.created",
 ];
+
+// Add these constants at the top with the other constants
+const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime";
+const OPENAI_MODEL = "gpt-4o-realtime-preview-2024-10-01";
+const OPENAI_MAX_TOKENS = 4096; // Optional: Add token limit if needed
 
 // Function to handle incoming requests for the AI agent
 export function agentController(req, res) {
@@ -47,7 +56,7 @@ export function mediaStreamController(connection, req) {
 
   // Create a WebSocket connection to the OpenAI API
   const openAiWs = new WebSocket(
-    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
+    `${OPENAI_REALTIME_URL}?model=${OPENAI_MODEL}`,
     {
       headers: {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, // Use the API key for authorization
@@ -57,6 +66,31 @@ export function mediaStreamController(connection, req) {
   );
 
   let streamSid = null; // Variable to hold the stream ID
+
+  // Add transcript tracking variables
+  let conversationTranscript = [];
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const transcriptPath = path.join(
+    process.cwd(),
+    "transcripts",
+    `conversation-${timestamp}.txt`
+  );
+
+  // Helper function to append to transcript
+  async function appendToTranscript(speaker, text) {
+    const entry = `[${new Date().toISOString()}] ${speaker}: ${text}\n`;
+    conversationTranscript.push(entry);
+
+    // Ensure transcripts directory exists and write to file
+    try {
+      await fs.mkdir(path.join(process.cwd(), "transcripts"), {
+        recursive: true,
+      });
+      await fs.appendFile(transcriptPath, entry);
+    } catch (error) {
+      console.error("Error writing transcript:", error);
+    }
+  }
 
   // Function to send session updates to the OpenAI API
   const sendSessionUpdate = () => {
@@ -70,6 +104,11 @@ export function mediaStreamController(connection, req) {
         instructions: SYSTEM_INSTRUCTIONS, // Instructions for the AI
         modalities: ["text", "audio"], // Types of communication
         temperature: 0.8, // Creativity level of the AI
+        // Add optional parameters
+        max_tokens: OPENAI_MAX_TOKENS,
+        top_p: 1,
+        frequency_penalty: 0,
+        presence_penalty: 0,
       },
     };
 
@@ -83,10 +122,35 @@ export function mediaStreamController(connection, req) {
     setTimeout(sendSessionUpdate, 250); // Send session update after a short delay
   });
 
+  // Add a flag to track if we're getting a complete response
+  let isReceivingResponse = false;
+  let currentResponse = "";
+
   // Listen for messages from the OpenAI WebSocket
   openAiWs.on("message", (data) => {
     try {
-      const response = JSON.parse(data.toString()); // Parse the incoming message
+      const response = JSON.parse(data.toString());
+
+      // Handle different response types
+      switch (response.type) {
+        case "response.content.start":
+          isReceivingResponse = true;
+          currentResponse = "";
+          break;
+
+        case "response.content.part":
+          if (response.content.text) {
+            currentResponse += response.content.text;
+          }
+          break;
+
+        case "response.content.done":
+          isReceivingResponse = false;
+          if (currentResponse) {
+            appendToTranscript("AI", currentResponse.trim());
+          }
+          break;
+      }
 
       // Log specific event types
       if (LOG_EVENT_TYPES.includes(response.type)) {
@@ -123,6 +187,15 @@ export function mediaStreamController(connection, req) {
   connection.on("message", (message) => {
     try {
       const data = JSON.parse(message);
+
+      // Add connection state validation
+      if (openAiWs.readyState !== WebSocket.OPEN) {
+        console.warn(
+          "OpenAI WebSocket is not open. Current state:",
+          openAiWs.readyState
+        );
+        return;
+      }
 
       switch (data.event) {
         case "start":
@@ -182,11 +255,15 @@ export function mediaStreamController(connection, req) {
   });
 
   // Handle connection close
-  connection.on("close", () => {
+  connection.on("close", async () => {
     clearTimeout(warningTimeoutId);
     clearTimeout(finalTimeoutId);
+
+    // Add final timestamp to transcript
+    await appendToTranscript("SYSTEM", "Conversation ended");
+
     if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close(); // Close the WebSocket if it's open
-    console.log("Client disconnected."); // Log when a client disconnects
+    console.log("Client disconnected. Transcript saved to:", transcriptPath); // Log when a client disconnects
   });
 
   // Handle WebSocket close and errors
@@ -198,3 +275,15 @@ export function mediaStreamController(connection, req) {
     console.error("Error in the OpenAI WebSocket:", error); // Log any WebSocket errors
   });
 }
+
+// Add graceful shutdown handling
+process.on("SIGTERM", async () => {
+  console.log("Received SIGTERM. Closing connections gracefully...");
+
+  if (openAiWs.readyState === WebSocket.OPEN) {
+    openAiWs.close();
+  }
+  if (connection.readyState === WebSocket.OPEN) {
+    connection.close();
+  }
+});

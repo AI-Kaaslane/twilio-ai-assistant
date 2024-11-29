@@ -1,31 +1,16 @@
 import WebSocket from "ws"; // Importing the WebSocket library for real-time communication
 const fs = require("fs").promises;
 const path = require("path");
+import {
+  SYSTEM_INSTRUCTIONS,
+  VOICE,
+  LOG_EVENT_TYPES,
+  OPENAI_REALTIME_URL,
+  OPENAI_MODEL,
+  OPENAI_MAX_TOKENS,
+} from "./constants.js";
 
-// Instructions for the AI assistant's personality and behavior
-const SYSTEM_INSTRUCTIONS =
-  "You are a lively, bubbly assistant with a quick-witted personality who likes chatting. Your tone is upbeat, playful, and engaging. Always sound excited to interact, regardless of the topic. You have a positive, can-do attitude, and always prone to hear what the interlocutor have to said founding interesting, and your quick speech style helps maintain a lively conversation pace. If the comunication is in Estonian, speak using the standard dialect familiar to native speakers, and use expressions that feel natural and local. Show enthusiasm about anything the user shares and use humor to keep things light and enjoyable.";
-const VOICE = "alloy"; // The voice type for the AI assistant
-
-// Types of events that the system will log
-const LOG_EVENT_TYPES = [
-  "response.content.done",
-  "response.content.start",
-  "response.content.part",
-  "rate_limits.updated",
-  "response.done",
-  "input_audio_buffer.committed",
-  "input_audio_buffer.speech_stopped",
-  "input_audio_buffer.speech_started",
-  "session.created",
-];
-
-// Add these constants at the top with the other constants
-const OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime";
-const OPENAI_MODEL = "gpt-4o-realtime-preview-2024-10-01";
-const OPENAI_MAX_TOKENS = 4096; // Optional: Add token limit if needed
-
-// Function to handle incoming requests for the AI agent
+// controller to handle incoming requests for the AI agent
 export function agentController(req, res) {
   // Creating a response in XML format for Twilio
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
@@ -42,7 +27,7 @@ export function agentController(req, res) {
   res.status(200).send(twimlResponse); // Send the response back to the client
 }
 
-// Function to manage the media stream connection
+// controller to manage the media stream connection
 export function mediaStreamController(connection, req) {
   console.log("Client connected to media stream"); // Log when a client connects
 
@@ -123,7 +108,6 @@ export function mediaStreamController(connection, req) {
   });
 
   // Add a flag to track if we're getting a complete response
-  let isReceivingResponse = false;
   let currentResponse = "";
 
   // Listen for messages from the OpenAI WebSocket
@@ -134,7 +118,6 @@ export function mediaStreamController(connection, req) {
       // Handle different response types
       switch (response.type) {
         case "response.content.start":
-          isReceivingResponse = true;
           currentResponse = "";
           break;
 
@@ -145,7 +128,6 @@ export function mediaStreamController(connection, req) {
           break;
 
         case "response.content.done":
-          isReceivingResponse = false;
           if (currentResponse) {
             appendToTranscript("AI", currentResponse.trim());
           }
